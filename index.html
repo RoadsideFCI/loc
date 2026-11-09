@@ -1,0 +1,239 @@
+<!doctype html>
+<!--
+  หน้าลูกค้าส่งตำแหน่ง (LOCATION_RELAY=ntfy) — ไฟล์เดียว วางบน Cloudflare Pages / GitHub Pages (https) · วิธี deploy: README.md
+  ลิงก์ใน SMS = https://<หน้านี้>/#<กุญแจ>.<เวลาหมดอายุ base36>  (ระบบ Roadside สร้างให้ — backend/app/services/location_request_service.py)
+    ส่วนหลัง # เบราว์เซอร์ไม่ส่งไปที่ server → Cloudflare / ntfy ไม่เห็นกุญแจ
+  ลูกค้ากดระบุตำแหน่ง → เลื่อนแผนที่ให้หมุดตรงรถ → ยืนยัน → เข้ารหัส {lat, lng, acc} (AES-128-GCM) → POST ไปที่ ntfy topic ของลิงก์นี้
+  ระบบ Roadside (ภายใน) ดึงจาก ntfy แล้วถอดรหัสเอง · ntfy เห็นแค่ข้อความที่เข้ารหัส
+  ⚠ NTFY_URL และวิธีคำนวณ topic ต้องตรงกับ backend (config NTFY_URL · _relay_topic) — แก้ฝั่งเดียวแล้วส่งตำแหน่งไม่ถึง
+-->
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Falcon Insurance — ส่งตำแหน่ง</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <style>
+    :root { --bg: #f1f5f9; --card: #ffffff; --text: #0f172a; --muted: #475569; --primary: #2563eb; --ok: #15803d; --warn: #b45309; --err: #dc2626; --line: #e2e8f0; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #0b1220; --card: #111a2e; --text: #e2e8f0; --muted: #94a3b8; --primary: #3b82f6; --ok: #4ade80; --warn: #fbbf24; --err: #f87171; --line: #1e293b; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans Thai", Tahoma, sans-serif; }
+    main { max-width: 640px; margin: 0 auto; min-height: 100dvh; padding: 16px; display: flex; align-items: flex-start; }
+    .card { width: 100%; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+    h1 { font-size: 1.15rem; margin: 0 0 8px; }
+    p { margin: 8px 0; line-height: 1.5; font-size: .95rem; }
+    .muted { color: var(--muted); }
+    .ok { color: var(--ok); font-weight: 600; }
+    .warn { color: var(--warn); }
+    .err { color: var(--err); }
+    button { width: 100%; padding: 14px 16px; margin-top: 12px; border: 0; border-radius: 8px; background: var(--primary); color: #fff; font-size: 1rem; font-weight: 600; cursor: pointer; }
+    button:disabled { opacity: .6; cursor: default; }
+    .map-wrap { position: relative; margin-top: 12px; }
+    #map { height: 58dvh; min-height: 256px; width: 100%; border-radius: 8px; border: 1px solid var(--line); }
+    .pin { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -100%); z-index: 1000; pointer-events: none; }
+    .recenter { position: absolute; top: 8px; right: 8px; z-index: 1000; width: auto; margin: 0; padding: 8px 10px; font-size: .8rem; background: var(--card); color: var(--text); border: 1px solid var(--line); box-shadow: 0 1px 4px rgba(0,0,0,.2); }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="card">
+      <h1>ส่งตำแหน่งของท่าน</h1>
+      <p id="msg" class="muted">กำลังตรวจสอบลิงก์…</p>
+
+      <button id="locate" type="button" hidden>ระบุตำแหน่งของฉัน</button>
+
+      <div id="adjust" hidden>
+        <p id="notice" class="warn" role="alert" hidden></p>
+        <div class="map-wrap">
+          <div id="map"></div>
+          <!-- ปลายหมุดอยู่จุดกึ่งกลางแผนที่ = ตำแหน่งที่ส่ง -->
+          <svg class="pin" width="36" height="48" viewBox="0 0 36 48" aria-hidden="true">
+            <path d="M18 47C18 47 34 28.5 34 17A16 16 0 0 0 2 17C2 28.5 18 47 18 47Z" fill="#dc2626" stroke="#fff" stroke-width="2"/>
+            <circle cx="18" cy="17" r="6" fill="#fff"/>
+          </svg>
+          <button id="recenter" class="recenter" type="button" hidden>กลับไปตำแหน่งของฉัน</button>
+        </div>
+        <button id="confirm" type="button">ยืนยันตำแหน่งนี้</button>
+        <p id="failed" class="err" role="alert" hidden>ส่งตำแหน่งไม่สำเร็จ กรุณาลองอีกครั้ง หรือแจ้งสถานที่กับเจ้าหน้าที่</p>
+      </div>
+    </div>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script>
+    "use strict";
+    // ต้องตรงกับ NTFY_URL ใน backend/.env
+    const NTFY_URL = "https://ntfy.sh";
+    const BANGKOK = { lat: 13.7563, lng: 100.5018 };
+    const GPS_ZOOM = 17, NO_GPS_ZOOM = 11;
+
+    const TEXT = {
+      description: "กดปุ่มด้านล่าง แล้วเลื่อนแผนที่ให้หมุดตรงกับตำแหน่งรถของท่าน ข้อมูลนี้ใช้เพื่อให้ความช่วยเหลือท่านเท่านั้น",
+      locating: "กำลังหาตำแหน่ง…",
+      sending: "กำลังส่ง…",
+      confirm: "ยืนยันตำแหน่งนี้",
+      sent: "ส่งตำแหน่งเรียบร้อยแล้ว เจ้าหน้าที่จะติดต่อท่านโดยเร็ว",
+      denied: "ไม่ได้เปิดการเข้าถึงตำแหน่ง กรุณาเลื่อนแผนที่ไปยังตำแหน่งของท่านเอง (หรือเปิด Location ให้เบราว์เซอร์ในการตั้งค่าโทรศัพท์ แล้วเปิดลิงก์ใหม่)",
+      gpsFailed: "หาตำแหน่งอัตโนมัติไม่สำเร็จ กรุณาเลื่อนแผนที่ไปยังตำแหน่งของท่านเอง",
+      alreadySent: "ท่านส่งตำแหน่งเรียบร้อยแล้ว ขอบคุณที่ใช้บริการ",
+      invalid: "ลิงก์นี้หมดอายุหรือใช้งานไม่ได้ กรุณาติดต่อเจ้าหน้าที่",
+      unsupported: "เบราว์เซอร์นี้ใช้งานหน้านี้ไม่ได้ กรุณาเปิดลิงก์ด้วย Chrome หรือ Safari หรือแจ้งสถานที่กับเจ้าหน้าที่",
+    };
+
+    const $ = (id) => document.getElementById(id);
+    const show = (el, on = true) => { el.hidden = !on; };
+    const setMsg = (text, cls = "muted") => { $("msg").textContent = text; $("msg").className = cls; };
+    const round6 = (n) => Math.round(n * 1e6) / 1e6;
+
+    function b64url(bytes) {
+      let s = "";
+      bytes.forEach((b) => { s += String.fromCharCode(b); });
+      return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    }
+    function b64urlDecode(text) {
+      const s = atob(text.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (text.length % 4)) % 4));
+      return Uint8Array.from(s, (c) => c.charCodeAt(0));
+    }
+
+    // topic = "fl" + base64url(SHA-256("topic|" + กุญแจ base64url) 16 byte แรก) — ตรงกับ _relay_topic() ฝั่ง backend
+    async function topicFor(keyText) {
+      const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("topic|" + keyText)));
+      return "fl" + b64url(digest.slice(0, 16));
+    }
+
+    async function encrypt(key, topic, payload) {
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const data = new TextEncoder().encode(JSON.stringify(payload));
+      const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: new TextEncoder().encode(topic) }, key, data));
+      const out = new Uint8Array(iv.length + ct.length);
+      out.set(iv);
+      out.set(ct, iv.length);
+      return b64url(out);
+    }
+
+    async function decrypts(key, topic, message) {
+      try {
+        const raw = b64urlDecode(message.trim());
+        await crypto.subtle.decrypt({ name: "AES-GCM", iv: raw.slice(0, 12), additionalData: new TextEncoder().encode(topic) }, key, raw.slice(12));
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    // เคยส่งจากลิงก์นี้แล้วไหม (ข้อความที่ถอดรหัสได้ด้วยกุญแจนี้ = ของจริง) · ntfy ใช้ไม่ได้ → ถือว่ายังไม่ส่ง
+    async function alreadySent(key, topic) {
+      try {
+        const res = await fetch(`${NTFY_URL}/${topic}/json?poll=1&since=all`, { cache: "no-store" });
+        if (!res.ok) return false;
+        for (const line of (await res.text()).split("\n")) {
+          if (!line.trim()) continue;
+          const event = JSON.parse(line);
+          if (event.event === "message" && typeof event.message === "string" && (await decrypts(key, topic, event.message))) return true;
+        }
+      } catch { /* ไม่รู้ = ให้ส่งได้ (ระบบรับครั้งแรกครั้งเดียวอยู่แล้ว) */ }
+      return false;
+    }
+
+    let key, topic, expires, gps, center = BANGKOK, map;
+
+    async function start() {
+      const [keyText, expText] = location.hash.slice(1).split(".");
+      expires = parseInt(expText || "", 36) * 1000;
+      if (!keyText || !Number.isFinite(expires)) return setMsg(TEXT.invalid);
+      if (!window.isSecureContext || !crypto.subtle) return setMsg(TEXT.unsupported, "err");
+      if (Date.now() > expires) return setMsg(TEXT.invalid);
+      try {
+        key = await crypto.subtle.importKey("raw", b64urlDecode(keyText), "AES-GCM", false, ["encrypt", "decrypt"]);
+        topic = await topicFor(keyText);
+      } catch {
+        return setMsg(TEXT.invalid);
+      }
+      if (await alreadySent(key, topic)) return setMsg(TEXT.alreadySent, "ok");
+      setMsg(TEXT.description);
+      show($("locate"));
+    }
+
+    function openMap(point, zoom) {
+      show($("locate"), false);
+      show($("adjust"));
+      center = point;
+      if (!window.L) return; // โหลดแผนที่ไม่ได้ → ส่งจุดจาก GPS ได้อย่างเดียว
+      map = L.map("map", { scrollWheelZoom: "center", touchZoom: "center", doubleClickZoom: "center" }).setView([point.lat, point.lng], zoom);
+      L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+      }).addTo(map);
+      map.on("moveend", () => {
+        const c = map.getCenter();
+        center = { lat: round6(c.lat), lng: round6(c.lng) };
+      });
+    }
+
+    function adjustWithoutGps(message) {
+      $("notice").textContent = message;
+      show($("notice"));
+      openMap(BANGKOK, NO_GPS_ZOOM);
+      if (!window.L) $("confirm").disabled = true; // ไม่มี GPS และไม่มีแผนที่ = ไม่มีตำแหน่งให้ส่ง
+    }
+
+    $("locate").addEventListener("click", () => {
+      if (!navigator.geolocation) return adjustWithoutGps(TEXT.gpsFailed);
+      $("locate").disabled = true;
+      $("locate").textContent = TEXT.locating;
+      navigator.geolocation.getCurrentPosition(
+        ({ coords }) => {
+          gps = { lat: round6(coords.latitude), lng: round6(coords.longitude), accuracy: coords.accuracy };
+          openMap(gps, GPS_ZOOM);
+          show($("recenter"), Boolean(map));
+        },
+        (e) => adjustWithoutGps(e.code === e.PERMISSION_DENIED ? TEXT.denied : TEXT.gpsFailed),
+        { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },
+      );
+    });
+
+    $("recenter").addEventListener("click", () => {
+      if (map && gps) map.setView([gps.lat, gps.lng], GPS_ZOOM);
+    });
+
+    $("confirm").addEventListener("click", async () => {
+      // ไม่มี GPS และยังไม่เลื่อนแผนที่ = ยังอยู่ที่กรุงเทพฯ ซึ่งไม่ใช่ตำแหน่งจริง
+      if (!gps && center.lat === BANGKOK.lat && center.lng === BANGKOK.lng) {
+        $("notice").textContent = TEXT.gpsFailed;
+        return show($("notice"));
+      }
+      if (Date.now() > expires) {
+        show($("adjust"), false);
+        return setMsg(TEXT.invalid);
+      }
+      const btn = $("confirm");
+      btn.disabled = true;
+      btn.textContent = TEXT.sending;
+      show($("failed"), false);
+      // เลื่อนหมุดแล้ว ความแม่นยำของ GPS ใช้กับจุดใหม่ไม่ได้
+      const acc = gps && gps.lat === center.lat && gps.lng === center.lng ? Math.round(gps.accuracy) : null;
+      try {
+        const message = await encrypt(key, topic, { lat: center.lat, lng: center.lng, acc });
+        // ไม่ใส่ header เพิ่ม → เป็น simple request (ไม่มี CORS preflight)
+        const res = await fetch(`${NTFY_URL}/${topic}`, { method: "POST", body: message });
+        if (!res.ok) throw new Error(String(res.status));
+        show($("adjust"), false);
+        setMsg(TEXT.sent, "ok");
+      } catch {
+        btn.disabled = false;
+        btn.textContent = TEXT.confirm;
+        show($("failed"));
+      }
+    });
+
+    start();
+  </script>
+</body>
+</html>
