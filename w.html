@@ -218,16 +218,46 @@
       });
     }
 
+    // โลโก้เป็น data URL (ไฟล์อยู่โดเมนเดียวกัน) — ใส่ลง PDF เองโดยตรง
+    async function logoDataUrl() {
+      const blob = await (await fetch("falcon-logo.png", { cache: "force-cache" })).blob();
+      const url = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+      const img = new Image();
+      img.src = url;
+      await img.decode();
+      return { url, width: img.naturalWidth, height: img.naturalHeight };
+    }
+
     // ถ่ายภาพสำเนา A4 → PDF หน้าเดียว (ยาวเกินย่อให้พอดี) — แบบเดียวกับ work-order-pdf.ts
+    // Safari บนมือถือมักถ่ายรูปในหน้าไม่ติด (โลโก้หาย) → ซ่อนโลโก้ตอนถ่าย (ยังกินที่เท่าเดิม) แล้ววางโลโก้ลง PDF ตรงตำแหน่งเดิมเอง
     async function savePdf(refNo) {
       for (const lib of LIBS) await loadScript(lib);
       const page = $("capture");
-      await document.fonts.ready;
-      const png = await window.htmlToImage.toPng(page, { pixelRatio: 2, backgroundColor: "#ffffff" });
+      const logoEl = page.querySelector("img");
+      const [logo] = await Promise.all([logoDataUrl().catch(() => null), document.fonts.ready]);
+      if (logo) logoEl.style.visibility = "hidden";
+      let png;
+      try {
+        png = await window.htmlToImage.toPng(page, { pixelRatio: 2, backgroundColor: "#ffffff" });
+      } finally {
+        logoEl.style.visibility = "";
+      }
       const ratio = page.scrollHeight / page.scrollWidth;
       const width = Math.min(A4.width, A4.height / ratio);
+      const left = (A4.width - width) / 2;
+      const mmPerPx = width / page.scrollWidth;
       const pdf = new window.jspdf.jsPDF({ unit: "mm", format: "a4" });
-      pdf.addImage(png, "PNG", (A4.width - width) / 2, 0, width, width * ratio);
+      pdf.addImage(png, "PNG", left, 0, width, width * ratio);
+      if (logo) {
+        const box = logoEl.getBoundingClientRect(), origin = page.getBoundingClientRect();
+        const h = box.height * mmPerPx;
+        pdf.addImage(logo.url, "PNG", left + (box.left - origin.left) * mmPerPx, (box.top - origin.top) * mmPerPx, h * (logo.width / logo.height), h);
+      }
       pdf.save(`ใบงาน ${refNo}.pdf`);
     }
 
