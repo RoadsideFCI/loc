@@ -114,6 +114,14 @@
       return "fl" + b64url(digest.slice(0, 16));
     }
 
+    // รหัสในลิงก์ → กุญแจ AES-128 — ตรงกับ aes_key() ฝั่ง backend
+    // ลิงก์รุ่นแรก (16 byte / 22 ตัว) = กุญแจตรง ๆ · ลิงก์สั้น (12 byte / 16 ตัว) = SHA-256("aes|" + รหัส) 16 byte แรก
+    async function aesKeyFor(keyText) {
+      const raw = b64urlDecode(keyText);
+      const bytes = raw.length === 16 ? raw : new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("aes|" + keyText))).slice(0, 16);
+      return crypto.subtle.importKey("raw", bytes, "AES-GCM", false, ["encrypt", "decrypt"]);
+    }
+
     async function encrypt(key, topic, payload) {
       const iv = crypto.getRandomValues(new Uint8Array(12));
       const data = new TextEncoder().encode(JSON.stringify(payload));
@@ -208,12 +216,14 @@
 
     async function start() {
       const [keyText, expText] = location.hash.slice(1).split(".");
-      expires = parseInt(expText || "", 36) * 1000;
+      // เวลาหมดอายุฐาน 36: ลิงก์ใหม่เป็น "นาที" (5 ตัว) · ลิงก์รุ่นแรกเป็น "วินาที" (≥ 1e9)
+      const exp = parseInt(expText || "", 36);
+      expires = exp >= 1e9 ? exp * 1000 : exp * 60000;
       if (!keyText || !Number.isFinite(expires)) return setMsg(TEXT.invalid);
       if (!window.isSecureContext || !crypto.subtle) return setMsg(TEXT.unsupported, "err");
       if (Date.now() > expires) return setMsg(TEXT.invalid);
       try {
-        key = await crypto.subtle.importKey("raw", b64urlDecode(keyText), "AES-GCM", false, ["encrypt", "decrypt"]);
+        key = await aesKeyFor(keyText);
         topic = await topicFor(keyText);
       } catch {
         return setMsg(TEXT.invalid);

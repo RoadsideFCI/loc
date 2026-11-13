@@ -103,6 +103,14 @@
       return "fl" + b64url(digest.slice(0, 16));
     }
 
+    // รหัสในลิงก์ → กุญแจ AES-128 — ตรงกับ aes_key() ฝั่ง backend (และ index.html)
+    // ลิงก์รุ่นแรก (16 byte / 22 ตัว) = กุญแจตรง ๆ · ลิงก์สั้น (12 byte / 16 ตัว) = SHA-256("aes|" + รหัส) 16 byte แรก
+    async function aesKeyFor(keyText) {
+      const raw = b64urlDecode(keyText);
+      const bytes = raw.length === 16 ? raw : new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("aes|" + keyText))).slice(0, 16);
+      return crypto.subtle.importKey("raw", bytes, "AES-GCM", false, ["decrypt"]);
+    }
+
     // ถอดได้ = ข้อความจริงจากระบบ · byte แรก 0x01 = บีบอัด (deflate-raw) · ถอดไม่ได้ / ปลอม = null
     async function decrypt(key, topic, message) {
       try {
@@ -267,7 +275,7 @@
       if (!window.isSecureContext || !crypto.subtle || typeof DecompressionStream === "undefined") return showMsg(TEXT.unsupported);
       let key, topic, payload;
       try {
-        key = await crypto.subtle.importKey("raw", b64urlDecode(keyText), "AES-GCM", false, ["decrypt"]);
+        key = await aesKeyFor(keyText);
         topic = await topicFor(keyText);
       } catch {
         return showMsg(TEXT.invalid);
